@@ -1,0 +1,40 @@
+name: Update README Stats
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'atcoder/**'
+      - 'CodeForces/**'
+      - 'CSES/**'
+      - 'USACO/**'
+      - 'AlgorithmRoadmap/**'
+
+jobs:
+  update-readme:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Update README stats
+        run: python3 scripts/update_readme.py
+
+      - name: Commit & push if changed
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "No changes in README.md"
+          else
+            git commit -m "Auto-update solution stats in README [skip ci]"
+            git push
+          fi
