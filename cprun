@@ -1,0 +1,433 @@
+#!/usr/bin/env python3
+"""
+cprun - Competitive Programming CLI & Workflow Manager
+Features:
+  - run: Compile & run C++ solutions with auto input detection and execution metrics
+  - debug: Compile & run with AddressSanitizer and UndefinedBehaviorSanitizer
+  - test: Test solution against multiple .in / .ans test cases
+  - stress: Run automated stress testing against brute force & generator
+  - new: Scaffold new problems or contest folders with CP template
+  - stats: Summarize solved problems across platforms
+  - clean: Remove compiled artifacts and binaries
+"""
+
+import sys
+import os
+import subprocess
+import time
+import argparse
+from pathlib import Path
+
+# ANSI colors
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN = "\033[36m"
+
+ROOT_DIR = Path(__file__).resolve().parent
+BUILD_DIR = ROOT_DIR / ".build"
+TEMPLATE_FILE = ROOT_DIR / "templates" / "template.cpp"
+
+CXX = os.environ.get("CXX", "g++")
+CXX_STANDARD = "-std=c++20"
+INCLUDE_FLAGS = ["-I.", f"-I{ROOT_DIR}", f"-I{ROOT_DIR / 'templates'}", f"-I{ROOT_DIR / 'library'}"]
+DEFAULT_FLAGS = [CXX_STANDARD, "-O2", "-Wall", "-Wextra", "-Wshadow", "-DLOCAL"] + INCLUDE_FLAGS
+DEBUG_FLAGS = [CXX_STANDARD, "-g", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-DLOCAL"] + INCLUDE_FLAGS
+
+
+def ensure_build_dir():
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_binary_path(src_file: Path, debug: bool = False) -> Path:
+    ensure_build_dir()
+    rel = src_file.resolve().relative_to(ROOT_DIR.resolve()) if src_file.resolve().is_relative_to(ROOT_DIR.resolve()) else src_file
+    tag = "dbg_" if debug else "bin_"
+    # Flatten path to single filename
+    flat_name = tag + str(rel).replace("/", "_").replace("\\", "_")
+    return BUILD_DIR / Path(flat_name).with_suffix("")
+
+
+def compile_file(src_file: Path, debug: bool = False) -> Path | None:
+    if not src_file.exists():
+        print(f"{RED}[Error]{RESET} File not found: {src_file}", file=sys.stderr)
+        return None
+
+    bin_path = get_binary_path(src_file, debug)
+    flags = DEBUG_FLAGS if debug else DEFAULT_FLAGS
+
+    # Check if rebuild is needed
+    if bin_path.exists() and bin_path.stat().st_mtime >= src_file.stat().st_mtime:
+        return bin_path
+
+    mode_label = f"{MAGENTA}[ASan/UBSan Debug]{RESET}" if debug else f"{CYAN}[O2 Release]{RESET}"
+    print(f"{BOLD}Compiling{RESET} {src_file.name} {mode_label}...", end=" ", flush=True)
+
+    cmd = [CXX] + flags + [str(src_file), "-o", str(bin_path)]
+    start = time.perf_counter()
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    compile_time = (time.perf_counter() - start) * 1000
+
+    if res.returncode != 0:
+        print(f"{RED}FAILED{RESET}")
+        print(res.stderr, file=sys.stderr)
+        return None
+
+    print(f"{GREEN}OK{RESET} ({compile_time:.0f}ms)")
+    return bin_path
+
+
+def find_input_file(src_file: Path, explicit_input: str | None = None) -> Path | None:
+    if explicit_input:
+        p = Path(explicit_input)
+        if p.exists():
+            return p
+        print(f"{YELLOW}[Warning]{RESET} Input file '{explicit_input}' not found. Checking directory defaults...")
+
+    src_dir = src_file.resolve().parent
+    base_name = src_file.stem
+
+    candidates = [
+        src_dir / "inp",
+        src_dir / "input.txt",
+        src_dir / "in.txt",
+        src_dir / f"{base_name}.in",
+        src_dir / f"{base_name.lower()}.in",
+        src_dir / f"{base_name.upper()}.in",
+    ]
+
+    for cand in candidates:
+        if cand.exists() and cand.is_file():
+            return cand
+    return None
+
+
+def run_solution(src_path: Path, input_file: str | None = None, debug: bool = False):
+    bin_path = compile_file(src_path, debug=debug)
+    if not bin_path:
+        return 1
+
+    inp = find_input_file(src_path, input_file)
+
+    print(f"{DIM}{'─' * 50}{RESET}")
+    if inp:
+        print(f"{BOLD}Input:{RESET} {CYAN}{inp.relative_to(ROOT_DIR) if inp.is_relative_to(ROOT_DIR) else inp}{RESET}")
+        with open(inp, "r") as f:
+            stdin_stream = f.read()
+    else:
+        print(f"{BOLD}Input:{RESET} {YELLOW}stdin (type input and press Ctrl+D):{RESET}")
+        stdin_stream = None
+
+    start = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            [str(bin_path)],
+            input=stdin_stream,
+            text=True,
+            capture_output=False if stdin_stream is None else True,
+            timeout=10.0,
+        )
+        elapsed = (time.perf_counter() - start) * 1000
+
+        if stdin_stream is not None:
+            if proc.stdout:
+                print(f"{BOLD}Output:{RESET}\n{proc.stdout}", end="" if proc.stdout.endswith("\n") else "\n")
+            if proc.stderr:
+                print(f"{YELLOW}Stderr:{RESET}\n{proc.stderr}", end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
+
+        print(f"{DIM}{'─' * 50}{RESET}")
+        status = f"{GREEN}Exited 0{RESET}" if proc.returncode == 0 else f"{RED}Exited {proc.returncode}{RESET}"
+        print(f"Time: {BOLD}{elapsed:.1f}ms{RESET} | Status: {status}")
+        return proc.returncode
+
+    except subprocess.TimeoutExpired:
+        print(f"\n{RED}{BOLD}Time Limit Exceeded (>10.0s){RESET}")
+        return 124
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}Interrupted.{RESET}")
+        return 130
+
+
+def test_solution(src_path: Path):
+    bin_path = compile_file(src_path, debug=False)
+    if not bin_path:
+        return 1
+
+    src_dir = src_path.resolve().parent
+    base_name = src_path.stem
+
+    # Find test pairs: (input, answer)
+    test_pairs = []
+    # Pattern 1: *.in with *.out or *.ans
+    for in_file in sorted(src_dir.glob("*.in")):
+        ans_file = in_file.with_suffix(".ans")
+        if not ans_file.exists():
+            ans_file = in_file.with_suffix(".out")
+        if ans_file.exists():
+            test_pairs.append((in_file, ans_file))
+
+    # Pattern 2: in1.txt with out1.txt or ans1.txt
+    for in_file in sorted(src_dir.glob("in*.txt")):
+        num = in_file.stem.replace("in", "")
+        out_cand = src_dir / f"out{num}.txt"
+        ans_cand = src_dir / f"ans{num}.txt"
+        if out_cand.exists():
+            test_pairs.append((in_file, out_cand))
+        elif ans_cand.exists():
+            test_pairs.append((in_file, ans_cand))
+
+    if not test_pairs:
+        print(f"{YELLOW}[Notice]{RESET} No matching (.in/.out) or (inX.txt/outX.txt) test pairs found in {src_dir}")
+        print(f"Running normal run with default input instead...")
+        return run_solution(src_path)
+
+    print(f"{BOLD}Running {len(test_pairs)} test cases...{RESET}\n")
+    all_passed = True
+
+    for idx, (in_file, ans_file) in enumerate(test_pairs, 1):
+        with open(in_file, "r") as f:
+            inp_data = f.read()
+        with open(ans_file, "r") as f:
+            expected = f.read().strip()
+
+        start = time.perf_counter()
+        try:
+            res = subprocess.run([str(bin_path)], input=inp_data, text=True, capture_output=True, timeout=5.0)
+            elapsed = (time.perf_counter() - start) * 1000
+            actual = res.stdout.strip()
+
+            if res.returncode != 0:
+                print(f"Test #{idx} ({in_file.name}): {RED}RUNTIME ERROR{RESET} (exit {res.returncode}) [{elapsed:.0f}ms]")
+                if res.stderr:
+                    print(res.stderr)
+                all_passed = False
+            elif actual == expected:
+                print(f"Test #{idx} ({in_file.name}): {GREEN}ACCEPTED{RESET} [{elapsed:.0f}ms]")
+            else:
+                print(f"Test #{idx} ({in_file.name}): {RED}WRONG ANSWER{RESET} [{elapsed:.0f}ms]")
+                print(f"  {BOLD}Expected:{RESET}\n{expected}")
+                print(f"  {BOLD}Got:{RESET}\n{actual}")
+                all_passed = False
+        except subprocess.TimeoutExpired:
+            print(f"Test #{idx} ({in_file.name}): {RED}TIME LIMIT EXCEEDED (>5s){RESET}")
+            all_passed = False
+
+    return 0 if all_passed else 1
+
+
+def stress_test(sol_path: Path, brute_path: Path, gen_path: Path, iters: int = 100):
+    print(f"{BOLD}Compiling stress test components...{RESET}")
+    sol_bin = compile_file(sol_path, debug=False)
+    brute_bin = compile_file(brute_path, debug=False)
+    gen_bin = compile_file(gen_path, debug=False)
+
+    if not sol_bin or not brute_bin or not gen_bin:
+        return 1
+
+    print(f"{GREEN}Starting stress test ({iters} iterations)...{RESET}")
+    fail_file = ROOT_DIR / "cmp_fail.in"
+
+    for it in range(1, iters + 1):
+        # Generate input
+        gen_res = subprocess.run([str(gen_bin), str(it)], capture_output=True, text=True)
+        test_input = gen_res.stdout
+
+        # Run brute
+        brute_res = subprocess.run([str(brute_bin)], input=test_input, capture_output=True, text=True, timeout=5.0)
+        expected = brute_res.stdout.strip()
+
+        # Run sol
+        sol_res = subprocess.run([str(sol_bin)], input=test_input, capture_output=True, text=True, timeout=5.0)
+        actual = sol_res.stdout.strip()
+
+        if sol_res.returncode != 0:
+            print(f"\n{RED}{BOLD}CRASH on test #{it}!{RESET} (Exit code {sol_res.returncode})")
+            fail_file.write_text(test_input)
+            print(f"Input written to: {fail_file}")
+            print(f"{BOLD}Input:{RESET}\n{test_input}")
+            return 1
+
+        if actual != expected:
+            print(f"\n{RED}{BOLD}MISMATCH on test #{it}!{RESET}")
+            fail_file.write_text(test_input)
+            print(f"Input written to: {fail_file}")
+            print(f"{BOLD}Input:{RESET}\n{test_input}")
+            print(f"{BOLD}Expected (Brute):{RESET}\n{expected}")
+            print(f"{BOLD}Actual (Solution):{RESET}\n{actual}")
+            return 1
+
+        if it % 10 == 0 or it == iters:
+            print(f"\rPassed {it}/{iters} tests...", end="", flush=True)
+
+    print(f"\n{GREEN}{BOLD}Stress test passed all {iters} tests without errors!{RESET}")
+    return 0
+
+
+def scaffold_new(platform: str, contest_or_id: str, problems: list[str]):
+    plat = platform.lower()
+    if plat in ["cf", "codeforces"]:
+        target_dir = ROOT_DIR / "CodeForces" / contest_or_id
+        default_ext = "cpp"
+        letters = [p.upper() for p in (problems if problems else ["A", "B", "C", "D"])]
+    elif plat in ["atcoder", "abc", "arc", "agc"]:
+        prefix = plat if plat in ["abc", "arc", "agc"] else ""
+        cid = prefix + contest_or_id if not contest_or_id.startswith(prefix) else contest_or_id
+        target_dir = ROOT_DIR / "atcoder" / cid
+        default_ext = "cpp"
+        letters = [p.lower() for p in (problems if problems else ["a", "b", "c", "d"])]
+    elif plat in ["cses"]:
+        target_dir = ROOT_DIR / "CSES"
+        letters = [contest_or_id] + problems
+    elif plat in ["usaco"]:
+        target_dir = ROOT_DIR / "USACO"
+        letters = [contest_or_id] + problems
+    else:
+        target_dir = ROOT_DIR / platform / contest_or_id
+        letters = problems if problems else ["solution"]
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    template_content = TEMPLATE_FILE.read_text() if TEMPLATE_FILE.exists() else "#include <bits/stdc++.h>\nusing namespace std;\nint main() {}\n"
+
+    created = []
+    for item in letters:
+        filename = f"{item}.cpp"
+        file_path = target_dir / filename
+        if not file_path.exists():
+            file_path.write_text(template_content)
+            created.append(file_path)
+
+    # Also create sample inp file if contest folder
+    inp_file = target_dir / "inp"
+    if not inp_file.exists():
+        inp_file.touch()
+
+    print(f"{GREEN}{BOLD}Created {len(created)} file(s) in:{RESET} {target_dir.relative_to(ROOT_DIR)}")
+    for f in created:
+        print(f"  + {f.name}")
+    print(f"  + inp (sample input file)")
+
+
+def get_stats() -> dict[str, int]:
+    stats = {}
+    for d in sorted(ROOT_DIR.iterdir()):
+        if d.is_dir() and not d.name.startswith(".") and d.name not in ["templates", "library", "scripts", "bin"]:
+            cpp_count = len(list(d.rglob("*.cpp")))
+            if cpp_count > 0:
+                stats[d.name] = cpp_count
+    return stats
+
+
+def print_stats(update_readme: bool = False):
+    stats = get_stats()
+    total = sum(stats.values())
+
+    print(f"\n{BOLD}Competitive Programming Solutions Overview{RESET}")
+    print(f"{'Platform':<22} | {'Solved':>8}")
+    print(f"{'─' * 22}─┼─{'─' * 8}")
+    for name, count in stats.items():
+        print(f"{CYAN}{name:<22}{RESET} | {BOLD}{count:>8}{RESET}")
+    print(f"{'─' * 22}─┼─{'─' * 8}")
+    print(f"{GREEN}{BOLD}{'Total Solutions':<22}{RESET} | {GREEN}{BOLD}{total:>8}{RESET}\n")
+
+    if update_readme:
+        script = ROOT_DIR / "scripts" / "update_readme.py"
+        if script.exists():
+            subprocess.run([sys.executable, str(script)])
+
+
+def is_elf_binary(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except (OSError, PermissionError):
+        return False
+
+
+def clean_artifacts(clean_all: bool = False):
+    ensure_build_dir()
+    build_files = list(BUILD_DIR.glob("*"))
+    for f in build_files:
+        f.unlink()
+    print(f"{GREEN}Cleaned {len(build_files)} files in .build/{RESET}")
+
+    if clean_all:
+        removed_out = 0
+        for out_file in list(ROOT_DIR.rglob("*.out")):
+            out_file.unlink()
+            removed_out += 1
+
+        removed_elf = 0
+        for f in list(ROOT_DIR.rglob("*")):
+            if f.is_file() and not f.name.endswith(".cpp") and not f.name.endswith(".py") and not f.name.endswith(".sh"):
+                if f.parent != BUILD_DIR and not str(f).startswith(str(ROOT_DIR / ".git")):
+                    if is_elf_binary(f):
+                        f.unlink()
+                        removed_elf += 1
+
+        print(f"{GREEN}Removed {removed_out} *.out files and {removed_elf} compiled ELF binaries.{RESET}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Competitive Programming Workflow CLI")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # run
+    run_parser = subparsers.add_parser("run", help="Compile and run a C++ solution")
+    run_parser.add_argument("file", help="Path to .cpp file")
+    run_parser.add_argument("input", nargs="?", default=None, help="Optional input file")
+
+    # debug
+    debug_parser = subparsers.add_parser("debug", help="Compile and run with ASan/UBSan")
+    debug_parser.add_argument("file", help="Path to .cpp file")
+    debug_parser.add_argument("input", nargs="?", default=None, help="Optional input file")
+
+    # test
+    test_parser = subparsers.add_parser("test", help="Run solution against test cases in folder")
+    test_parser.add_argument("file", help="Path to .cpp file")
+
+    # stress
+    stress_parser = subparsers.add_parser("stress", help="Stress test solution against brute force")
+    stress_parser.add_argument("sol", help="Candidate solution (.cpp)")
+    stress_parser.add_argument("brute", help="Slow/correct brute-force solution (.cpp)")
+    stress_parser.add_argument("gen", help="Random test generator (.cpp)")
+    stress_parser.add_argument("-n", "--iters", type=int, default=100, help="Number of iterations")
+
+    # new
+    new_parser = subparsers.add_parser("new", help="Scaffold new problem or contest")
+    new_parser.add_argument("platform", help="Platform (cf, atcoder, cses, usaco)")
+    new_parser.add_argument("id", help="Contest ID or problem name (e.g. 1900, abc390, 1068)")
+    new_parser.add_argument("problems", nargs="*", default=[], help="Problem letters (e.g. A B C D)")
+
+    # stats
+    stats_parser = subparsers.add_parser("stats", help="Show solution statistics")
+    stats_parser.add_argument("-u", "--update-readme", action="store_true", help="Sync stats with README.md")
+
+    # clean
+    clean_parser = subparsers.add_parser("clean", help="Clean build artifacts")
+    clean_parser.add_argument("--all", action="store_true", help="Also remove all *.out files")
+
+    args = parser.parse_args()
+
+    if args.command == "run":
+        sys.exit(run_solution(Path(args.file), args.input, debug=False))
+    elif args.command == "debug":
+        sys.exit(run_solution(Path(args.file), args.input, debug=True))
+    elif args.command == "test":
+        sys.exit(test_solution(Path(args.file)))
+    elif args.command == "stress":
+        sys.exit(stress_test(Path(args.sol), Path(args.brute), Path(args.gen), args.iters))
+    elif args.command == "new":
+        scaffold_new(args.platform, args.id, args.problems)
+    elif args.command == "stats":
+        print_stats(update_readme=args.update_readme)
+    elif args.command == "clean":
+        clean_artifacts(clean_all=args.all)
+
+
+if __name__ == "__main__":
+    main()

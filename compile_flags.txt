@@ -1,0 +1,9 @@
+-std=c++20
+-Wall
+-Wextra
+-Wshadow
+-O2
+-DLOCAL
+-I.
+-Itemplates
+-Ilibrary
