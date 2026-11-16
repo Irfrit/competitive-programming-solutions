@@ -1,30 +1,16 @@
-# Build artifacts
-.build/
-bin/
+# Build artifacts & executables
 *.out
 *.exe
 *.o
 *.a
 *.so
-*.dSYM/
+.build/
+bin/
 
-# Test outputs & stress testing artifacts
-cmp.out
-gen.out
-brute.out
-sol.out
-*.diff
-*.log
-
-# Editor & IDE files
+# Editor & OS files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 .DS_Store
-
-# Python cache
-__pycache__/
-*.py[cod]
-*$py.class
