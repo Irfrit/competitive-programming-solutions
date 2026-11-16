@@ -313,6 +313,90 @@ def scaffold_new(platform: str, contest_or_id: str, problems: list[str]):
         print(f"  + {f.name}")
     print(f"  + inp (sample input file)")
 
+    if created:
+        script = ROOT_DIR / "scripts" / "update_readme.py"
+        if script.exists():
+            subprocess.run([sys.executable, str(script)], capture_output=True)
+        print(f"{CYAN}Auto-updated README.md with new solution(s).{RESET}")
+
+
+def watch_workspace(daemon: bool = False, stop: bool = False):
+    ensure_build_dir()
+    pid_file = BUILD_DIR / "watcher.pid"
+
+    if stop:
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 15)
+                print(f"{GREEN}Stopped watcher daemon (PID {pid}).{RESET}")
+            except ProcessLookupError:
+                print(f"{YELLOW}Watcher process already stopped.{RESET}")
+            except Exception as e:
+                print(f"{RED}Error stopping watcher: {e}{RESET}")
+            pid_file.unlink(missing_ok=True)
+        else:
+            print(f"{YELLOW}No watcher daemon currently running.{RESET}")
+        return
+
+    if daemon:
+        if pid_file.exists():
+            try:
+                old_pid = int(pid_file.read_text().strip())
+                os.kill(old_pid, 0)
+                print(f"{YELLOW}Watcher already running in background (PID {old_pid}).{RESET}")
+                return
+            except ProcessLookupError:
+                pid_file.unlink(missing_ok=True)
+
+        log_file = open(BUILD_DIR / "watcher.log", "w")
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT_DIR / "cprun"), "watch"],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        pid_file.write_text(str(proc.pid))
+        print(f"{GREEN}Started watcher in background (PID {proc.pid}).{RESET}")
+        print(f"To stop: {BOLD}./cprun watch --stop{RESET}")
+        return
+
+    print(f"{GREEN}{BOLD}Watching for solutions in {ROOT_DIR.name}...{RESET} (Press Ctrl+C to stop)")
+    update_script = ROOT_DIR / "scripts" / "update_readme.py"
+    has_inotify = subprocess.run(["which", "inotifywait"], capture_output=True).returncode == 0
+
+    if has_inotify:
+        watch_dirs = [str(ROOT_DIR / d) for d in ["atcoder", "CodeForces", "CSES", "USACO", "AlgorithmRoadmap"] if (ROOT_DIR / d).exists()]
+        cmd = ["inotifywait", "-m", "-r", "-e", "create,delete,moved_to,moved_from"] + watch_dirs
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            last_update = 0.0
+            for line in p.stdout:
+                parts = line.strip().split()
+                if len(parts) >= 3 and parts[-1].endswith(".cpp"):
+                    now = time.time()
+                    if now - last_update > 0.3:
+                        last_update = now
+                        res = subprocess.run([sys.executable, str(update_script)], capture_output=True, text=True)
+                        msg = res.stdout.strip() or "README.md updated"
+                        print(f"{CYAN}[Event]{RESET} {line.strip()} -> {GREEN}{msg}{RESET}", flush=True)
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}Watcher stopped.{RESET}")
+    else:
+        last_count = -1
+        try:
+            while True:
+                stats = get_stats()
+                current_count = sum(stats.values())
+                if current_count != last_count:
+                    if last_count != -1:
+                        subprocess.run([sys.executable, str(update_script)])
+                        print(f"{GREEN}[Auto-Update]{RESET} Solution change detected: now {current_count} total.")
+                    last_count = current_count
+                time.sleep(2)
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}Watcher stopped.{RESET}")
+
 
 def get_stats() -> dict[str, int]:
     stats = {}
@@ -409,6 +493,11 @@ def main():
     stats_parser = subparsers.add_parser("stats", help="Show solution statistics")
     stats_parser.add_argument("-u", "--update-readme", action="store_true", help="Sync stats with README.md")
 
+    # watch
+    watch_parser = subparsers.add_parser("watch", help="Watch folders and auto-update README on file creation")
+    watch_parser.add_argument("-d", "--daemon", action="store_true", help="Run watcher in background")
+    watch_parser.add_argument("--stop", action="store_true", help="Stop background watcher")
+
     # clean
     clean_parser = subparsers.add_parser("clean", help="Clean build artifacts")
     clean_parser.add_argument("--all", action="store_true", help="Also remove all *.out files")
@@ -427,6 +516,8 @@ def main():
         scaffold_new(args.platform, args.id, args.problems)
     elif args.command == "stats":
         print_stats(update_readme=args.update_readme)
+    elif args.command == "watch":
+        watch_workspace(daemon=args.daemon, stop=args.stop)
     elif args.command == "clean":
         clean_artifacts(clean_all=args.all)
 
