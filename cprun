@@ -112,16 +112,18 @@ def run_solution(src_path: Path, input_file: str | None = None, debug: bool = Fa
     if not bin_path:
         return 1
 
-    inp = find_input_file(src_path, input_file)
-
-    print(f"{DIM}{'─' * 50}{RESET}")
-    if inp:
-        print(f"{BOLD}Input:{RESET} {CYAN}{inp.relative_to(ROOT_DIR) if inp.is_relative_to(ROOT_DIR) else inp}{RESET}")
-        with open(inp, "r") as f:
-            stdin_stream = f.read()
+    stdin_stream = None
+    if not sys.stdin.isatty():
+        print(f"{BOLD}Input:{RESET} {CYAN}piped stdin{RESET}")
+        stdin_stream = sys.stdin.read()
     else:
-        print(f"{BOLD}Input:{RESET} {YELLOW}stdin (type input and press Ctrl+D):{RESET}")
-        stdin_stream = None
+        inp = find_input_file(src_path, input_file)
+        if inp:
+            print(f"{BOLD}Input:{RESET} {CYAN}{inp.relative_to(ROOT_DIR) if inp.is_relative_to(ROOT_DIR) else inp}{RESET}")
+            with open(inp, "r") as f:
+                stdin_stream = f.read()
+        else:
+            print(f"{BOLD}Input:{RESET} {YELLOW}stdin (type input and press Ctrl+D):{RESET}")
 
     start = time.perf_counter()
     try:
